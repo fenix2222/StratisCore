@@ -2,14 +2,15 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { Router } from '@angular/router';
 import { Title } from '@angular/platform-browser';
 
-import { Subscription } from 'rxjs';
-import { retryWhen, delay, tap } from 'rxjs/operators';
+import { Subscription, interval, ReplaySubject } from 'rxjs';
+import { retryWhen, delay, tap, takeUntil } from 'rxjs/operators';
 
 import { ApiService } from '@shared/services/api.service';
 import { ElectronService } from 'ngx-electron';
 import { GlobalService } from '@shared/services/global.service';
 
 import { NodeStatus } from '@shared/models/node-status';
+import { SignalRService } from '@shared/services/signal-r.service';
 
 @Component({
   selector: 'app-root',
@@ -18,7 +19,13 @@ import { NodeStatus } from '@shared/models/node-status';
 })
 
 export class AppComponent implements OnInit, OnDestroy {
-  constructor(private router: Router, private apiService: ApiService, private globalService: GlobalService, private titleService: Title, private electronService: ElectronService) { }
+  constructor(private router: Router,
+    private apiService: ApiService,
+    private globalService: GlobalService,
+    private titleService: Title,
+    private electronService: ElectronService,
+    private signalRService: SignalRService) {
+    }
 
   private subscription: Subscription;
   private statusIntervalSubscription: Subscription;
@@ -26,6 +33,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly TryDelayMilliseconds = 3000;
   public sidechainEnabled;
   public apiConnected = false;
+  public signalRConnected$ = new ReplaySubject<boolean>();
 
   loading = true;
   loadingFailed = false;
@@ -34,11 +42,23 @@ export class AppComponent implements OnInit, OnDestroy {
     this.sidechainEnabled = this.globalService.getSidechainEnabled();
     this.setTitle();
     this.tryStart();
+    this.initSignalR();
   }
 
   ngOnDestroy() {
     this.subscription.unsubscribe();
     this.statusIntervalSubscription.unsubscribe();
+    this.signalRConnected$.next(true);
+    this.signalRConnected$.complete();
+  }
+
+  private initSignalR() {
+    interval(5000)
+      .pipe(takeUntil(this.signalRConnected$))
+      .subscribe(_ => {
+        this.signalRService.startConnection(this.signalRConnected$);
+        this.signalRService.addFullNodeEventListener();
+      });
   }
 
   // Attempts to initialise the wallet by contacting the daemon.  Will try to do this MaxRetryCount times.
