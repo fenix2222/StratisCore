@@ -9,20 +9,27 @@ import { ReplaySubject } from 'rxjs';
 export class SignalRService {
 
   private hubConnection: signalR.HubConnection;
+  private connecting = false;
 
   public startConnection = (completed$: ReplaySubject<boolean>) => {
     this.hubConnection = new signalR.HubConnectionBuilder()
                             .withUrl('http://localhost:38224/events-hub')
                             .build();
 
+    if (this.connecting) { return; }
+    this.connecting = true;
     this.hubConnection
       .start()
       .then(() => {
+        this.connecting = false;
         Log.info('Connection started');
         completed$.next(true);
         completed$.complete();
       })
-      .catch(err => Log.info('Error while starting connection: ' + err));
+      .catch(err => {
+        this.connecting = false;
+        Log.info('Error while starting connection: ' + err);
+      });
   }
 
   public addFullNodeEventListener = () => {
