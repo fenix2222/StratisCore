@@ -1,13 +1,26 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap';
 import { ConfirmationModalComponent } from '@shared/components/confirmation-modal/confirmation-modal.component';
-import { CurrentAccountService } from '@shared/services/current-account.service';
 import { GlobalService } from '@shared/services/global.service';
 import { ModalService } from '@shared/services/modal.service';
-import { WalletService } from '@shared/services/wallet.service';
 import { ClipboardService } from 'ngx-clipboard';
-import { forkJoin, interval, Observable, of, ReplaySubject, Subject, throwError } from 'rxjs';
-import { catchError, first, switchMap, take, takeUntil, tap } from 'rxjs/operators';
+import {
+  forkJoin,
+  interval,
+  Observable,
+  of,
+  ReplaySubject,
+  Subject,
+  throwError,
+} from 'rxjs';
+import {
+  catchError,
+  first,
+  switchMap,
+  takeUntil,
+  tap,
+  take,
+} from 'rxjs/operators';
 
 import { Mode, TransactionComponent } from '../../smart-contracts/components/modals/transaction/transaction.component';
 import { SmartContractsServiceBase } from '../../smart-contracts/smart-contracts.service';
@@ -21,6 +34,8 @@ import { TokensService } from '../services/tokens.service';
 import { AddTokenComponent } from './add-token/add-token.component';
 import { ProgressComponent } from './progress/progress.component';
 import { SendTokenComponent } from './send-token/send-token.component';
+import { CurrentAccountService } from '@shared/services/current-account.service';
+import { WalletService } from '@shared/services/wallet.service';
 
 @Component({
   selector: 'app-tokens',
@@ -47,6 +62,7 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
 
   constructor(
     private tokenService: TokensService,
+    private walletService: WalletService,
     private smartContractsService: SmartContractsServiceBase,
     private clipboardService: ClipboardService,
     private genericModalService: ModalService,
@@ -68,17 +84,11 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
         }),
         take(1)
       )
-    .subscribe(history => this.history = history);
+      .subscribe(history => this.history = history);
 
-    this.smartContractsService.GetAddressBalance(this.selectedAddress)
-      .pipe(
-        catchError(error => {
-          this.showApiError(`Error retrieving balance. ${error}`);
-          return of(0);
-        }),
-        take(1)
-      )
-      .subscribe(balance => this.balance = balance);
+    this.walletService.wallet().pipe(
+      takeUntil(this.disposed$))
+      .subscribe(balance => this.balance = balance.amountConfirmed);
 
     // Update requested token balances
     this.tokenBalanceRefreshRequested$
@@ -104,22 +114,22 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
       return this.tokenService
         .GetTokenBalance(new TokenBalanceRequest(token.address, this.selectedAddress))
         .pipe(catchError(error => {
-          Log.error(error);
-          Log.log(`Error getting token balance for token address ${token.address}`);
-          return of(null);
-        }),
-        tap(balance => {
-          if (balance === null) {
-            token.balance = null;
-            this.tokenLoading[token.address] = 'error';
-            return;
-          }
+            Log.error(error);
+            Log.log(`Error getting token balance for token address ${token.address}`);
+            return of(null);
+          }),
+          tap(balance => {
+            if (balance === null) {
+              token.balance = null;
+              this.tokenLoading[token.address] = 'error';
+              return;
+            }
 
-          this.tokenLoading[token.address] = 'loaded';
-          if (balance !== token.balance) {
-            token.balance = balance;
-          }
-        }));
+            this.tokenLoading[token.address] = 'loaded';
+            if (balance !== token.balance) {
+              token.balance = balance;
+            }
+          }));
     }));
   }
 
@@ -154,36 +164,39 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
   }
 
   addToken() {
-    const modal = this.modalService.open(AddTokenComponent, { backdrop: 'static', keyboard: false });
+    const modal = this.modalService.open(AddTokenComponent, {backdrop: 'static', keyboard: false});
     (<AddTokenComponent>modal.componentInstance).tokens = this.availableTokens;
     modal.result.then(value => {
       if (value) {
 
         Log.info('Refresh token list');
 
-        this.updateTokenCollection(value);
+        this.tokens.push(value);
         this.tokenBalanceRefreshRequested$.next([value]);
       }
     });
   }
 
   issueToken() {
-    const modal = this.modalService.open(TransactionComponent, { backdrop: 'static', keyboard: false });
-    (<TransactionComponent>modal.componentInstance).mode = Mode.IssueToken;
-    (<TransactionComponent>modal.componentInstance).selectedSenderAddress = this.selectedAddress;
-    (<TransactionComponent>modal.componentInstance).balance = this.balance;
-    (<TransactionComponent>modal.componentInstance).coinUnit = this.coinUnit;
+    const modal = this.modalService.open(TransactionComponent, {backdrop: 'static', keyboard: false});
+    const transactionComponent = modal.componentInstance as TransactionComponent;
+
+    transactionComponent.mode = Mode.IssueToken;
+    transactionComponent.selectedSenderAddress = this.selectedAddress;
+    transactionComponent.balance = this.balance;
+    transactionComponent.coinUnit = this.coinUnit;
     modal.result.then(value => {
       if (!value || !value.symbol || !value.transactionHash || !value.name) {
         return;
       }
 
       // start monitoring token progress
-      const progressModal = this.modalService.open(ProgressComponent, { backdrop: 'static', keyboard: false });
-      (<ProgressComponent>progressModal.componentInstance).loading = true;
-      (<ProgressComponent>progressModal.componentInstance).title = 'Waiting for Confirmation';
-      (<ProgressComponent>progressModal.componentInstance).message = 'Your token creation transaction has been broadcast and is waiting to be mined. This window will close once the transaction receives one confirmation.';
-      (<ProgressComponent>progressModal.componentInstance).close.subscribe(() => progressModal.close());
+      const progressModal = this.modalService.open(ProgressComponent, {backdrop: 'static', keyboard: false});
+      const progressComponent = progressModal.componentInstance as ProgressComponent;
+      progressComponent.loading = true;
+      progressComponent.title = 'Waiting for Confirmation';
+      progressComponent.message = 'Your token creation transaction has been broadcast and is waiting to be mined. This window will close once the transaction receives one confirmation.';
+      progressComponent.close.subscribe(() => progressModal.close());
 
       const receiptQuery = this.smartContractsService.GetReceiptSilent(value.transactionHash)
         .pipe(
@@ -215,7 +228,7 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
             const token = new SavedToken(value.symbol, newTokenAddress, 0, value.name);
             this.tokenService.AddToken(token);
             progressModal.close('ok');
-            this.updateTokenCollection(token);
+            this.tokens.push(token);
             this.tokenBalanceRefreshRequested$.next([token]);
           },
           error => {
@@ -232,10 +245,12 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
   }
 
   delete(item: SavedToken) {
-    const modal = this.modalService.open(ConfirmationModalComponent, { backdrop: 'static', keyboard: false });
+    const modal = this.modalService.open(ConfirmationModalComponent, {backdrop: 'static', keyboard: false});
     (<ConfirmationModalComponent>modal.componentInstance).body = `Are you sure you want to remove "${item.ticker}" token`;
     modal.result.then(value => {
-      if (!value) { return; }
+      if (!value) {
+        return;
+      }
       const removeResult = this.tokenService.RemoveToken(item);
       if (removeResult.failure) {
         this.showApiError(removeResult.message);
@@ -248,26 +263,30 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
 
   send(item: SavedToken) {
 
-    const modal = this.modalService.open(SendTokenComponent, { backdrop: 'static', keyboard: false });
-    (<SendTokenComponent>modal.componentInstance).walletName = this.walletName;
-    (<SendTokenComponent>modal.componentInstance).selectedSenderAddress = this.selectedAddress;
-    (<SendTokenComponent>modal.componentInstance).balance = this.balance;
-    (<SendTokenComponent>modal.componentInstance).coinUnit = this.coinUnit;
-    (<SendTokenComponent>modal.componentInstance).token = item;
-    modal.result.then(value => {
+    const modal = this.modalService.open(SendTokenComponent, {backdrop: 'static', keyboard: false});
+    const sendTokenComponent = modal.componentInstance as SendTokenComponent;
 
+    sendTokenComponent.walletName = this.walletName;
+    sendTokenComponent.selectedSenderAddress = this.selectedAddress;
+    sendTokenComponent.balance = this.balance;
+    sendTokenComponent.coinUnit = this.coinUnit;
+    sendTokenComponent.token = item;
+
+    modal.result.then(value => {
       if (!value || !value.callResponse) {
         return;
       }
 
       // start monitoring token progress
-      const progressModal = this.modalService.open(ProgressComponent, { backdrop: 'static', keyboard: false });
-      (<ProgressComponent>progressModal.componentInstance).loading = true;
-      (<ProgressComponent>progressModal.componentInstance).close.subscribe(() => progressModal.close());
-      (<ProgressComponent>progressModal.componentInstance).title = 'Waiting For Confirmation';
+      const progressModal = this.modalService.open(ProgressComponent, {backdrop: 'static', keyboard: false});
+      const progressComponent = progressModal.componentInstance as ProgressComponent;
+
+      progressComponent.loading = true;
+      progressComponent.close.subscribe(() => progressModal.close());
+      progressComponent.title = 'Waiting For Confirmation';
       // tslint:disable-next-line:max-line-length
-      (<ProgressComponent>progressModal.componentInstance).message = 'Your token transfer transaction has been broadcast and is waiting to be mined. This window will close once the transaction receives one confirmation.';
-      (<ProgressComponent>progressModal.componentInstance).summary = `Send ${value.amount} ${item.name} to ${value.recipientAddress}`;
+      progressComponent.message = 'Your token transfer transaction has been broadcast and is waiting to be mined. This window will close once the transaction receives one confirmation.';
+      progressComponent.summary = `Send ${value.amount} ${item.name} to ${value.recipientAddress}`;
 
       const receiptQuery = this.smartContractsService.GetReceiptSilent(value.callResponse.transactionId)
         .pipe(
@@ -316,16 +335,5 @@ export class TokensComponent implements OnInit, OnDestroy, Disposable {
           }
         );
     });
-  }
-
-  private updateTokenCollection(token: SavedToken) {
-    if (!token) { return; }
-
-    const existingTokenIndex = this.tokens.map(t => t.address).indexOf(token.address);
-    if (existingTokenIndex >= 0) {
-      this.tokens.splice(existingTokenIndex, 1);
-    }
-
-    this.tokens.push(token);
   }
 }

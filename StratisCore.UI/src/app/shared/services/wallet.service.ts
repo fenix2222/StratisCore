@@ -1,19 +1,32 @@
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { BehaviorSubject, Observable, of, Subject } from 'rxjs';
 import { Injectable } from '@angular/core';
-import { FeeEstimation } from '@shared/models/fee-estimation';
-import { Transaction } from '@shared/models/transaction';
-import { BuildTransactionResponse, TransactionResponse } from '@shared/models/transaction-response';
-import { TransactionSending } from '@shared/models/transaction-sending';
-import { WalletInfo } from '@shared/models/wallet-info';
-import { CurrentAccountService } from '@shared/services/current-account.service';
-import { ErrorService } from '@shared/services/error-service';
-import { GlobalService } from '@shared/services/global.service';
-import { Balances, TransactionsHistoryItem, WalletBalance, WalletHistory } from '@shared/services/interfaces/api.i';
-import { BlockConnectedSignalREvent, SignalREvent, SignalREvents, WalletInfoSignalREvent } from '@shared/services/interfaces/signalr-events.i';
-import { RestApi } from '@shared/services/rest-api';
 import { SignalRService } from '@shared/services/signalr-service';
-import { BehaviorSubject, Observable, Subject } from 'rxjs';
-import { catchError, flatMap, map, tap } from 'rxjs/operators';
+import { WalletInfo } from '@shared/models/wallet-info';
+import {
+  Balances,
+  TransactionsHistoryItem,
+  WalletBalance,
+  WalletHistory, WalletNamesData
+} from '@shared/services/interfaces/api.i';
+import {
+  BlockConnectedSignalREvent,
+  SignalREvent,
+  SignalREvents,
+  WalletInfoSignalREvent
+} from '@shared/services/interfaces/signalr-events.i';
+import { catchError, map, flatMap, tap, debounceTime } from 'rxjs/operators';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { RestApi } from '@shared/services/rest-api';
+import { GlobalService } from '@shared/services/global.service';
+import { ErrorService } from '@shared/services/error-service';
+import { Transaction } from '@shared/models/transaction';
+import { TransactionSending } from '@shared/models/transaction-sending';
+import { BuildTransactionResponse, TransactionResponse } from '@shared/models/transaction-response';
+import { FeeEstimation } from '@shared/models/fee-estimation';
+import { CurrentAccountService } from '@shared/services/current-account.service';
+import { WalletLoad } from '@shared/models/wallet-load';
+import { WalletResync } from '@shared/models/wallet-rescan';
+import { AddressBalance } from "@shared/models/address-balance";
 
 @Injectable({
   providedIn: 'root'
@@ -23,8 +36,10 @@ export class WalletService extends RestApi {
   private walletUpdatedSubjects: { [walletName: string]: BehaviorSubject<WalletBalance> } = {};
   private walletHistorySubjects: { [walletName: string]: BehaviorSubject<TransactionsHistoryItem[]> } = {};
   private currentWallet: WalletInfo;
-  private ibdMode: boolean;
+
   public accountsEnabled: boolean;
+  public isSyncing: boolean;
+  public ibdMode: boolean;
 
   constructor(
     globalService: GlobalService,
@@ -38,9 +53,11 @@ export class WalletService extends RestApi {
       this.currentWallet = wallet;
     });
 
-    currentAccountService.currentAddress.subscribe(() => {
-      this.accountsEnabled = globalService.getSidechainEnabled() && this.currentAccountService.hasActiveAddress();
-      this.updateWalletForCurrentAddress();
+    currentAccountService.currentAddress.subscribe((address) => {
+      this.accountsEnabled = globalService.getSidechainEnabled();
+      if (null != address) {
+        this.updateWalletForCurrentAddress();
+      }
     });
 
     // When we get a TransactionReceived event get the WalletBalance and History using the RestApi
@@ -53,41 +70,65 @@ export class WalletService extends RestApi {
 
     signalRService.registerOnMessageEventHandler<WalletInfoSignalREvent>(SignalREvents.WalletGeneralInfo,
       (message) => {
+        // Update wallet history after chain is synced or IBD mode completed
+        const syncCompleted = (this.isSyncing && message.lastBlockSyncedHeight === message.chainTip)
+          || (this.ibdMode && message.isChainSynced);
+
+        let historyRefreshed = false;
+        this.isSyncing = message.lastBlockSyncedHeight !== message.chainTip;
         this.ibdMode = !message.isChainSynced;
-        if (message.walletName === this.currentWallet.walletName) {
-          const walletBalance = message.accountsBalances.find(acc => acc.accountName === `account ${this.currentWallet.account}`);
-          this.updateWalletForCurrentAddress(walletBalance);
-        }
-      });
 
-    // If we have unconfirmed amount refresh the wallet when a new block is connected.
-    // Currently we also refreshWalletHistory on all BlockConnected events on mainnet
-    // to show Staking Rewards, TODO : this needs a SignalR Event also
-    signalRService.registerOnMessageEventHandler<BlockConnectedSignalREvent>(SignalREvents.BlockConnected,
-      (message) => {
-        if (this.ibdMode) {
-          return;
-        }
-
-        const walletSubject = this.getWalletSubject(this.currentWallet);
-        if ((!this.globalService.getSidechainEnabled()) || walletSubject.value.amountUnconfirmed > 0) {
+        if (syncCompleted) {
           this.refreshWalletHistory();
+          historyRefreshed = true;
+        }
+
+        if (this.currentWallet && message.walletName === this.currentWallet.walletName) {
+          const walletBalance = message.accountsBalances.find(acc => acc.accountName === `account ${this.currentWallet.account}`);
+          this.updateWalletForCurrentAddress(walletBalance, historyRefreshed);
         }
       });
+  }
+
+  public getWalletNames(): Observable<WalletNamesData> {
+    return this.get<WalletNamesData>('wallet/list-wallets').pipe(
+      catchError(err => this.handleHttpError(err))
+    );
+  }
+
+  public loadStratisWallet(data: WalletLoad): Observable<any> {
+    return this.post('wallet/load/', data).pipe(
+      catchError(err => this.handleHttpError(err))
+    );
   }
 
   public transactionReceived(): Observable<any> {
     return this.transactionReceivedSubject.asObservable();
   }
 
-  public getAllAddressesForWallet(data: WalletInfo): Observable<any> {
-    return this.get('wallet/addresses', this.getWalletParams(data)).pipe(
+  public getAllAddressesForWallet(data: WalletInfo): Observable<AddressBalance> {
+    return this.get<AddressBalance>('wallet/addresses', this.getWalletParams(data)).pipe(
+      map((response => {
+        response.addresses = response.addresses.sort((a, b) => b.amountConfirmed - a.amountConfirmed);
+        return response;
+      })),
       catchError(err => this.handleHttpError(err))
     );
   }
 
   public getUnusedReceiveAddress(data: WalletInfo): Observable<any> {
     return this.get('wallet/unusedaddress', this.getWalletParams(data)).pipe(
+      catchError(err => this.handleHttpError(err))
+    );
+  }
+
+  public rescanWallet(data: WalletResync): Observable<any> {
+    return this.post('wallet/sync-from-date/', data).pipe(
+      tap(() => {
+        this.isSyncing = true;
+        this.clearWalletHistory(data.date.getTime());
+        this.refreshWalletHistory();
+      }),
       catchError(err => this.handleHttpError(err))
     );
   }
@@ -123,6 +164,12 @@ export class WalletService extends RestApi {
   private getWalletHistory(data: WalletInfo): Observable<WalletHistory> {
     let extra = null;
     if (this.accountsEnabled) {
+      if (!this.currentAccountService.address) {
+        return of(<WalletHistory>{
+          history: []
+        });
+      }
+
       extra = {
         address: this.currentAccountService.address
       };
@@ -190,14 +237,18 @@ export class WalletService extends RestApi {
 
       // Get initial Wallet History
       this.getWalletHistory(walletInfo).toPromise().then(response => {
-        this.walletHistorySubjects[walletInfo.walletName].next(response.history[walletInfo.account].transactionsHistory);
+        if (response.history[walletInfo.account]) {
+          this.walletHistorySubjects[walletInfo.walletName].next(response.history[walletInfo.account].transactionsHistory);
+        }
       });
     }
     return this.walletHistorySubjects[walletInfo.walletName];
   }
 
   private getWalletBalance(data: WalletInfo): Observable<Balances> {
-    return this.get<Balances>('wallet/balance', this.getWalletParams(data)).pipe(
+    return this.get<Balances>('wallet/balance', this.getWalletParams(data, {
+      'includeBalanceByAddress': `${this.accountsEnabled}`
+    })).pipe(
       catchError(err => this.handleHttpError(err))
     );
   }
@@ -213,18 +264,30 @@ export class WalletService extends RestApi {
     return params;
   }
 
-  private updateWalletForCurrentAddress(walletBalance?: WalletBalance): void {
-    const walletSubject = this.getWalletSubject(this.currentWallet);
+  private updateWalletForCurrentAddress(walletBalance?: WalletBalance, historyRefreshed?: boolean): void {
+    if (!this.currentWallet) {
+      return;
+    }
 
+    const walletSubject = this.getWalletSubject(this.currentWallet);
     const newBalance = new WalletBalance(
       walletBalance || walletSubject.value,
       walletSubject.value ? walletSubject.value.currentAddress : null);
 
     if (this.accountsEnabled) {
-      if (null == newBalance.currentAddress || newBalance.currentAddress.address !== this.currentAccountService.address) {
+      if (null != this.currentAccountService.address
+        && (null == newBalance.currentAddress || newBalance.currentAddress.address !== this.currentAccountService.address)) {
         newBalance.setCurrentAccountAddress(this.currentAccountService.address);
+        this.clearWalletHistory(0);
         this.refreshWalletHistory();
+        historyRefreshed = true;
       }
+    }
+
+    if (!historyRefreshed && (walletSubject.value
+      && (walletSubject.value.amountConfirmed !== newBalance.amountConfirmed
+        || walletSubject.value.amountUnconfirmed !== newBalance.amountUnconfirmed))) {
+      this.refreshWalletHistory();
     }
 
     walletSubject.next(newBalance);
@@ -238,8 +301,21 @@ export class WalletService extends RestApi {
   }
 
   private refreshWalletHistory(): void {
-    const walletHistorySubject = this.getWalletHistorySubject(this.currentWallet);
-    this.getWalletHistory(this.currentWallet).toPromise().then(
-      response => walletHistorySubject.next(response.history[this.currentWallet.account].transactionsHistory));
+    if (this.currentWallet) {
+      const walletHistorySubject = this.getWalletHistorySubject(this.currentWallet);
+      this.getWalletHistory(this.currentWallet).toPromise().then(
+        response => {
+          if (response.history[this.currentWallet.account]) {
+            walletHistorySubject.next(response.history[this.currentWallet.account].transactionsHistory);
+          }
+        });
+    }
+  }
+
+  private clearWalletHistory(fromDate: number): void {
+    if (this.currentWallet) {
+      const walletHistorySubject = this.getWalletHistorySubject(this.currentWallet);
+      walletHistorySubject.next(Array.from((walletHistorySubject.value || []).filter(item => item.timestamp < fromDate)));
+    }
   }
 }

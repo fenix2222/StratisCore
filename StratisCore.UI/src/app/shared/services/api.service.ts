@@ -6,15 +6,13 @@ import { GlobalService } from './global.service';
 import { AddressLabel } from '../models/address-label';
 import { WalletCreation } from '../models/wallet-creation';
 import { WalletRecovery } from '../models/wallet-recovery';
-import { WalletLoad } from '../models/wallet-load';
 import { WalletInfo, WalletInfoRequest } from '../models/wallet-info';
 import { NodeStatus } from '../models/node-status';
-import { WalletRescan } from '../models/wallet-rescan';
 import { LocalExecutionResult } from '@shared/models/local-execution-result';
 import { TokenBalanceRequest } from 'src/app/wallet/tokens/models/token-balance-request';
 import { RestApi } from '@shared/services/rest-api';
 import { IApiService } from '@shared/services/interfaces/services.i';
-import { WalletFileData, WalletHistory } from '@shared/services/interfaces/api.i';
+import { WalletHistory } from '@shared/services/interfaces/api.i';
 import { ErrorService } from '@shared/services/error-service';
 
 @Injectable({
@@ -61,14 +59,6 @@ export class ApiService extends RestApi implements IApiService {
     );
   }
 
-  /**
-   * Gets available wallets at the default path
-   */
-  public getWalletFiles(): Observable<WalletFileData> {
-    return this.get<WalletFileData>('wallet/files').pipe(
-      catchError(err => this.handleHttpError(err))
-    );
-  }
 
   /** Gets the extended public key from a certain wallet */
   public getExtPubkey(data: WalletInfo): Observable<any> {
@@ -104,15 +94,6 @@ export class ApiService extends RestApi implements IApiService {
    */
   public recoverStratisWallet(data: WalletRecovery): Observable<any> {
     return this.post('wallet/recover/', data).pipe(
-      catchError(err => this.handleHttpError(err))
-    );
-  }
-
-  /**
-   * Load a Stratis wallet
-   */
-  public loadStratisWallet(data: WalletLoad): Observable<any> {
-    return this.post('wallet/load/', data).pipe(
       catchError(err => this.handleHttpError(err))
     );
   }
@@ -169,18 +150,6 @@ export class ApiService extends RestApi implements IApiService {
     );
   }
 
-  /** Rescan wallet from a certain date using remove-transactions */
-  public rescanWallet(data: WalletRescan): Observable<any> {
-    const params = new HttpParams()
-      .set('walletName', data.name)
-      .set('fromDate', data.fromDate.toDateString())
-      .set('reSync', 'true');
-    return this.delete('wallet/remove-transactions/', params).pipe(
-      catchError(err => this.handleHttpError(err))
-    );
-  }
-
-
   /**
    * Send shutdown signal to the daemon
    */
@@ -213,18 +182,6 @@ export class ApiService extends RestApi implements IApiService {
   public getAccountBalance(walletName: string): Observable<any> {
     const params = new HttpParams().set('walletName', walletName);
     return this.get('smartcontractwallet/account-balance', params).pipe(
-      catchError(err => this.handleHttpError(err))
-    );
-  }
-
-  /*
-    * Get the balance of the active smart contract address.
-    */
-  public getAddressBalance(address: string): Observable<any> {
-    const params = new HttpParams().set('address', address);
-    return this.pollingInterval.pipe(
-      startWith(0),
-      switchMap(() => this.get('smartcontractwallet/address-balance', params)),
       catchError(err => this.handleHttpError(err))
     );
   }
